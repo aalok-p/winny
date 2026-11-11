@@ -289,6 +289,75 @@ def decide(holdid, cosignerid, action):
         return {"status": "stopped"}
     return {"status": "denied", "reason": "Invalid action."}
 
+def receipt(txid):
+    q = "transactions?select=*&id=eq." + urllib.parse.quote(str(txid))
+    rows = sb("GET", q)
+    if not rows:
+        return {"receipt": None}
+    t = rows[0]
+    fam = getfamily(t.get("family_id"))
+    whopaid = t.get("payer_id")
+    decidedby = t.get("decided_by")
+    if fam:
+        for m in fam.get("members", []):
+            if m.get("id") == whopaid:
+                whopaid = m.get("name") or whopaid
+            if decidedby and m.get("id") == decidedby:
+                decidedby = m.get("name") or decidedby
+    data = {
+        "who paid": whopaid,
+        "to whom": t.get("payee"),
+        "how much": str(t.get("amount", "")) + " " + str(t.get("currency", "")),
+        "when": t.get("created_at"),
+        "outcome": t.get("outcome"),
+        "risk level": t.get("risk_level"),
+        "risk reason": t.get("risk_reason")
+    }
+    if decidedby:
+        data["who decided"] = decidedby
+    return {"receipt": data}
+
+def familyhistory(familyid, limit=50, memberid=None):
+    q = "transactions?select=*&family_id=eq." + urllib.parse.quote(str(familyid)) + "&order=created_at.desc&limit=" + str(int(limit))
+    if memberid:
+        q += "&payer_id=eq." + urllib.parse.quote(str(memberid))
+    rows = sb("GET", q)
+    out = []
+    for t in rows:
+        r = receipt(t.get("id"))
+        if r.get("receipt"):
+            out.append(r.get("receipt"))
+    return out
+
+def summary(familyid):
+    q = "transactions?select=*&family_id=eq." + urllib.parse.quote(str(familyid))
+    rows = sb("GET", q)
+    stats = {
+        "total payments": 0,
+        "total auto_approved": 0,
+        "total approved": 0,
+        "total stopped": 0,
+        "total amount flowed": 0.0,
+        "total amount stopped": 0.0
+    }
+    for t in rows:
+        stats["total payments"] += 1
+        outcome = t.get("outcome")
+        try:
+            amt = float(t.get("amount", 0) or 0)
+        except Exception:
+            amt = 0.0
+        if outcome == "auto_approved":
+            stats["total auto_approved"] += 1
+            stats["total amount flowed"] += amt
+        elif outcome == "approved":
+            stats["total approved"] += 1
+            stats["total amount flowed"] += amt
+        elif outcome == "stopped":
+            stats["total stopped"] += 1
+            stats["total amount stopped"] += amt
+    return stats
+
 if __name__ == "__main__":
     import risk_engine
 
@@ -439,6 +508,26 @@ if __name__ == "__main__":
     hid2 = r3.get("holdid")
     approved = decide(hid2, cosigner["id"], "approve")
     print("approve", approved.get("status"))
+
+    histlist = familyhistory(fam["id"])
+    print("history", len(histlist))
+    for r in histlist:
+        print("receipt", r)
+    if histlist:
+        first = histlist[0]
+        assert "who paid" in first
+        assert "to whom" in first
+        assert "how much" in first
+        assert "when" in first
+        assert "outcome" in first
+        assert "risk level" in first
+        assert "risk reason" in first
+    stats = summary(fam["id"])
+    print("summary", stats)
+    assert stats.get("total payments") == len(histlist)
+    assert stats.get("total stopped", 0) >= 1
+    assert stats.get("total approved", 0) >= 1
+    assert stats.get("total auto_approved", 0) >= 1
 
     for h in store["holds"]:
         try:
