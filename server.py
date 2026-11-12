@@ -91,6 +91,8 @@ class Handler(BaseHTTPRequestHandler):
                 sendjson(self, {"error": "id required"}, 400)
                 return
             sendjson(self, family.getfamily(fid))
+        elif path == "/api/families":
+            sendjson(self, engine.listfamilies())
         elif path == "/api/cosigners":
             familyid = qs.get("familyid", [None])[0]
             memberid = qs.get("memberid", [None])[0]

@@ -214,6 +214,12 @@ def history(familyid):
     q = "transactions?select=*&family_id=eq." + urllib.parse.quote(familyid) + "&order=created_at.desc"
     return sb("GET", q)
 
+def listfamilies():
+    try:
+        return sb("GET", "families?select=*")
+    except Exception:
+        return []
+
 def approved(holdid):
     hold = gethold(holdid)
     if not hold:
