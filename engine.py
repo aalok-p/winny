@@ -56,7 +56,8 @@ def buildhistory(payerid):
             "payerid": r.get("payer_id"),
             "amount": r.get("amount"),
             "payee": r.get("payee"),
-            "payee_country": r.get("currency") and r.get("payee_country") or r.get("payee_country")
+            "payee_country": r.get("payee_country"),
+            "created_at": r.get("created_at")
         }
         past.append(p)
         try:
@@ -77,12 +78,13 @@ def buildhistory(payerid):
 
 def buildrules(fam):
     if not fam:
-        return {"limit": None, "trusted": [], "approved": []}
+        return {"limit": None, "trusted": [], "approved": [], "blocked": []}
     rules = fam.get("rules", {}) if isinstance(fam, dict) else {}
     return {
         "limit": rules.get("limit"),
         "trusted": list(rules.get("trusted", [])),
-        "approved": list(rules.get("approved", []))
+        "approved": list(rules.get("approved", [])),
+        "blocked": list(rules.get("blocked", []))
     }
 
 def cosignerids(fam, payerid):
@@ -131,8 +133,8 @@ def propose(payment, payerid, familyid):
     level = risk.get("level", "medium")
     reason = risk.get("reason", "")
     flags = risk.get("flags", [])
-    need = bool(risk.get("cosign", level != "low"))
-    if level == "low" and not need:
+    need = level != "low"
+    if not need:
         if haspaypal():
             order = pay.create_hold(amount, currency, note)
         else:
@@ -225,6 +227,8 @@ def decide(holdid, cosignerid, action):
     hold = gethold(holdid)
     if not hold:
         return {"status": "denied", "reason": "Hold not found."}
+    if hold.get("status") != "held":
+        return {"status": "denied", "reason": "This payment has already been decided."}
     payerid = hold.get("payer_id")
     familyid = hold.get("family_id")
     fam = getfamily(familyid)
