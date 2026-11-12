@@ -134,24 +134,11 @@ def propose(payment, payerid, familyid):
     reason = risk.get("reason", "")
     flags = risk.get("flags", [])
     need = level != "low"
-    if not need:
-        if haspaypal():
-            order = pay.create_hold(amount, currency, note)
-        else:
-            order = fakepaypal("ORDER")
-        oid = order.get("id")
-        if haspaypal():
-            auth = pay.authorize(oid)
-        else:
-            auth = fakepaypal("AUTH")
-        aid = auth.get("id")
-        try:
-            if haspaypal():
-                res = pay.capture(aid, amount, currency)
-            else:
-                res = {"id": "CAP" + aid, "status": "COMPLETED"}
-        except Exception:
-            res = {"id": aid, "status": "COMPLETED"}
+    real = haspaypal()
+
+    if not need and not real:
+        oid = fakepaypal("ORDER").get("id")
+        aid = fakepaypal("AUTH").get("id")
         tx = {
             "id": str(uuid.uuid4()),
             "family_id": familyid,
@@ -172,11 +159,13 @@ def propose(payment, payerid, familyid):
         except Exception:
             pass
         return {"status": "auto_approved", "assessment": risk}
-    if haspaypal():
+
+    if real:
         order = pay.create_hold(amount, currency, note)
     else:
         order = fakepaypal("ORDER")
     oid = order.get("id")
+    link = pay.approval_link(order) if real else None
     hid = str(uuid.uuid4())
     hold = {
         "id": hid,
@@ -195,7 +184,8 @@ def propose(payment, payerid, familyid):
         "requires_cosign": need,
         "paypal_order_id": oid,
         "paypal_auth_id": None,
-        "status": "held",
+        "approval_link": link,
+        "status": "awaiting_buyer" if real else "held",
         "created_at": now(),
         "decided_at": None,
         "decided_by": None,
@@ -206,7 +196,8 @@ def propose(payment, payerid, familyid):
     except Exception:
         pass
     cs = cosignerids(fam, payerid)
-    return {"status": "held", "holdid": hid, "assessment": risk, "cosigners": cs}
+    status = "awaiting_buyer" if real else "held"
+    return {"status": status, "holdid": hid, "assessment": risk, "cosigners": cs, "approvallink": link}
 
 def gethold(holdid):
     q = "holds?select=*&id=eq." + urllib.parse.quote(holdid)
@@ -222,6 +213,60 @@ def getholds(familyid):
 def history(familyid):
     q = "transactions?select=*&family_id=eq." + urllib.parse.quote(familyid) + "&order=created_at.desc"
     return sb("GET", q)
+
+def approved(holdid):
+    hold = gethold(holdid)
+    if not hold:
+        return {"status": "denied", "reason": "Hold not found."}
+    if hold.get("status") != "awaiting_buyer":
+        return {"status": hold.get("status") or "denied"}
+    oid = hold.get("paypal_order_id")
+    link = hold.get("approval_link")
+    if haspaypal():
+        order = pay.get_order(oid)
+        if order.get("status") != "APPROVED":
+            return {"status": "awaiting_buyer", "approvallink": pay.approval_link(order) or link}
+        auth = pay.authorize(oid)
+    else:
+        auth = fakepaypal("AUTH")
+    aid = auth.get("id")
+    currency = hold.get("currency", "USD")
+    amount = str(hold.get("amount", "0"))
+
+    if not hold.get("requires_cosign"):
+        if haspaypal():
+            pay.capture(aid, amount, currency)
+        sb("PATCH", "holds?id=eq." + urllib.parse.quote(holdid), {
+            "status": "approved",
+            "paypal_auth_id": aid,
+            "decided_at": now()
+        })
+        tx = {
+            "id": str(uuid.uuid4()),
+            "family_id": hold.get("family_id"),
+            "hold_id": holdid,
+            "payer_id": hold.get("payer_id"),
+            "payee": hold.get("payee"),
+            "amount": hold.get("amount"),
+            "currency": currency,
+            "purpose": hold.get("purpose"),
+            "outcome": "auto_approved",
+            "risk_level": hold.get("risk_level"),
+            "risk_reason": hold.get("risk_reason"),
+            "decided_by": None,
+            "created_at": now()
+        }
+        try:
+            sb("POST", "transactions", tx)
+        except Exception:
+            pass
+        return {"status": "auto_approved"}
+
+    sb("PATCH", "holds?id=eq." + urllib.parse.quote(holdid), {
+        "status": "held",
+        "paypal_auth_id": aid
+    })
+    return {"status": "held", "holdid": holdid}
 
 def decide(holdid, cosignerid, action):
     hold = gethold(holdid)
@@ -241,11 +286,15 @@ def decide(holdid, cosignerid, action):
     amount = str(hold.get("amount", "0"))
     currency = hold.get("currency", "USD")
     if action == "approve":
-        if haspaypal():
-            auth = pay.authorize(oid)
-        else:
-            auth = fakepaypal("AUTH")
-        aid = auth.get("id")
+        aid = hold.get("paypal_auth_id")
+        if not aid:
+            if haspaypal():
+                order = pay.get_order(oid)
+                if order.get("status") != "APPROVED":
+                    return {"status": "denied", "reason": "The payer has not approved this payment on PayPal yet."}
+                aid = pay.authorize(oid).get("id")
+            else:
+                aid = fakepaypal("AUTH").get("id")
         try:
             if haspaypal():
                 res = pay.capture(aid, amount, currency)
@@ -279,19 +328,11 @@ def decide(holdid, cosignerid, action):
         return {"status": "approved"}
     if action == "stop":
         aid = hold.get("paypal_auth_id")
-        try:
-            if haspaypal():
-                if aid:
-                    pay.void(aid)
-                else:
-                    auth = pay.authorize(oid)
-                    aid = auth.get("id")
-                    try:
-                        pay.void(aid)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        if aid and haspaypal():
+            try:
+                pay.void(aid)
+            except Exception:
+                pass
         sb("PATCH", "holds?id=eq." + urllib.parse.quote(holdid), {
             "status": "stopped",
             "decided_at": now(),

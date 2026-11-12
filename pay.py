@@ -68,6 +68,13 @@ def get_order(order_id):
     return payload
 
 
+def approval_link(order):
+    for link in order.get("links") or []:
+        if link.get("rel") in ("payer-action", "approve"):
+            return link.get("href")
+    return None
+
+
 def authorize(order_id):
     status, payload = request("POST", f"/v2/checkout/orders/{order_id}/authorize", {}, token=token())
     if status not in (200, 201):

@@ -103,7 +103,13 @@ class Handler(BaseHTTPRequestHandler):
                 sendjson(self, {"error": "payerid and familyid required"}, 400)
                 return
             sendjson(self, engine.propose(payment, payerid, familyid))
-        elif path == "/api/decide":
+        elif path == "/api/approved":
+            holdid = body.get("holdid")
+            if not holdid:
+                sendjson(self, {"error": "holdid required"}, 400)
+                return
+            sendjson(self, engine.approved(holdid))
+        elif path == "/api/decide":            
             holdid = body.get("holdid")
             cosignerid = body.get("cosignerid")
             action = body.get("action")
