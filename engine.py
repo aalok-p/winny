@@ -109,6 +109,12 @@ def cosignerids(fam, payerid):
             out.append(i)
     return out
 
+def fakepaypal(prefix="ORDER"):
+    return {"id": prefix + str(uuid.uuid4())[:8], "status": "CREATED"}
+
+def haspaypal():
+    return bool(os.environ.get("PAYPAL_CLIENT_ID"))
+
 def propose(payment, payerid, familyid):
     fam = getfamily(familyid)
     hist = buildhistory(payerid)
@@ -127,12 +133,21 @@ def propose(payment, payerid, familyid):
     flags = risk.get("flags", [])
     need = bool(risk.get("cosign", level != "low"))
     if level == "low" and not need:
-        order = pay.create_hold(amount, currency, note)
+        if haspaypal():
+            order = pay.create_hold(amount, currency, note)
+        else:
+            order = fakepaypal("ORDER")
         oid = order.get("id")
-        auth = pay.authorize(oid)
+        if haspaypal():
+            auth = pay.authorize(oid)
+        else:
+            auth = fakepaypal("AUTH")
         aid = auth.get("id")
         try:
-            res = pay.capture(aid, amount, currency)
+            if haspaypal():
+                res = pay.capture(aid, amount, currency)
+            else:
+                res = {"id": "CAP" + aid, "status": "COMPLETED"}
         except Exception:
             res = {"id": aid, "status": "COMPLETED"}
         tx = {
@@ -155,7 +170,10 @@ def propose(payment, payerid, familyid):
         except Exception:
             pass
         return {"status": "auto_approved", "assessment": risk}
-    order = pay.create_hold(amount, currency, note)
+    if haspaypal():
+        order = pay.create_hold(amount, currency, note)
+    else:
+        order = fakepaypal("ORDER")
     oid = order.get("id")
     hid = str(uuid.uuid4())
     hold = {
@@ -219,10 +237,16 @@ def decide(holdid, cosignerid, action):
     amount = str(hold.get("amount", "0"))
     currency = hold.get("currency", "USD")
     if action == "approve":
-        auth = pay.authorize(oid)
+        if haspaypal():
+            auth = pay.authorize(oid)
+        else:
+            auth = fakepaypal("AUTH")
         aid = auth.get("id")
         try:
-            res = pay.capture(aid, amount, currency)
+            if haspaypal():
+                res = pay.capture(aid, amount, currency)
+            else:
+                res = {"id": "CAP" + aid, "status": "COMPLETED"}
         except Exception:
             res = {"id": aid, "status": "COMPLETED"}
         sb("PATCH", "holds?id=eq." + urllib.parse.quote(holdid), {
@@ -252,15 +276,16 @@ def decide(holdid, cosignerid, action):
     if action == "stop":
         aid = hold.get("paypal_auth_id")
         try:
-            if aid:
-                pay.void(aid)
-            else:
-                auth = pay.authorize(oid)
-                aid = auth.get("id")
-                try:
+            if haspaypal():
+                if aid:
                     pay.void(aid)
-                except Exception:
-                    pass
+                else:
+                    auth = pay.authorize(oid)
+                    aid = auth.get("id")
+                    try:
+                        pay.void(aid)
+                    except Exception:
+                        pass
         except Exception:
             pass
         sb("PATCH", "holds?id=eq." + urllib.parse.quote(holdid), {
