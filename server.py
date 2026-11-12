@@ -1,7 +1,9 @@
 import json
 import os
+import queue
+import threading
 import urllib.parse
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 
 import engine
 import family
@@ -50,6 +52,19 @@ def sendcors(handler):
     handler.send_header("Access-Control-Allow-Headers", "Content-Type")
     handler.end_headers()
 
+listeners = set()
+listenlock = threading.Lock()
+
+def broadcast(kind, data):
+    msg = "event: " + kind + "\ndata: " + json.dumps(data or {}) + "\n\n"
+    with listenlock:
+        waiting = list(listeners)
+    for q in waiting:
+        try:
+            q.put_nowait(msg)
+        except Exception:
+            pass
+
 class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         sendcors(self)
@@ -83,8 +98,36 @@ class Handler(BaseHTTPRequestHandler):
                 sendjson(self, {"error": "familyid and memberid required"}, 400)
                 return
             sendjson(self, family.getcosigners(familyid, memberid))
+        elif path == "/api/stream":
+            self.stream()
         else:
             sendjson(self, {"error": "not found"}, 404)
+
+    def stream(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        box = queue.Queue()
+        with listenlock:
+            listeners.add(box)
+        try:
+            self.wfile.write(b": connected\n\n")
+            self.wfile.flush()
+            while True:
+                try:
+                    msg = box.get(timeout=15)
+                except queue.Empty:
+                    msg = ": ping\n\n"
+                self.wfile.write(msg.encode("utf-8"))
+                self.wfile.flush()
+        except Exception:
+            pass
+        finally:
+            with listenlock:
+                listeners.discard(box)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -102,21 +145,27 @@ class Handler(BaseHTTPRequestHandler):
             if not payerid or not familyid:
                 sendjson(self, {"error": "payerid and familyid required"}, 400)
                 return
-            sendjson(self, engine.propose(payment, payerid, familyid))
+            out = engine.propose(payment, payerid, familyid)
+            broadcast("payment", out)
+            sendjson(self, out)
         elif path == "/api/approved":
             holdid = body.get("holdid")
             if not holdid:
                 sendjson(self, {"error": "holdid required"}, 400)
                 return
-            sendjson(self, engine.approved(holdid))
-        elif path == "/api/decide":            
+            out = engine.approved(holdid)
+            broadcast("payment", out)
+            sendjson(self, out)
+        elif path == "/api/decide":
             holdid = body.get("holdid")
             cosignerid = body.get("cosignerid")
             action = body.get("action")
             if not holdid or not cosignerid or not action:
                 sendjson(self, {"error": "holdid, cosignerid, and action required"}, 400)
                 return
-            sendjson(self, engine.decide(holdid, cosignerid, action))
+            out = engine.decide(holdid, cosignerid, action)
+            broadcast("payment", out)
+            sendjson(self, out)
         elif path == "/api/family":
             name = body.get("name")
             if not name:
@@ -148,7 +197,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = 8081
-    server = HTTPServer(("", port), Handler)
+    server = ThreadingHTTPServer(("", port), Handler)
     print("Winny server on port " + str(port))
     try:
         server.serve_forever()
